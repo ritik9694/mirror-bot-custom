@@ -54,6 +54,7 @@ class TgUploader:
         self._lprefix = ""
         self._media_group = False
         self._is_private = False
+        self._upload_status_msg = None
 
     async def _upload_progress(self, current, _):
         if self._listener.isCancelled:
@@ -81,39 +82,18 @@ class TgUploader:
 
     async def _msg_to_reply(self):
         if self._listener.upDest:
-            msg = (
-                self._listener.message.link
-                if self._listener.isSuperChat
-                else self._listener.message.text.lstrip("/")
-            )
-            try:
-                if self._listener.userTransmission:
-                    self._sent_msg = await user.send_message(
-                        chat_id=self._listener.upDest,
-                        text=msg,
-                        disable_web_page_preview=True,
-                        disable_notification=True,
-                    )
-                else:
-                    self._sent_msg = await self._listener.client.send_message(
-                        chat_id=self._listener.upDest,
-                        text=msg,
-                        disable_web_page_preview=True,
-                        disable_notification=True,
-                    )
-                    self._is_private = self._sent_msg.chat.type.name == "PRIVATE"
-            except Exception as e:
-                await self._listener.onUploadError(str(e))
-                return False
+            # Do not post source command or URL in destination channel.
+            self._sent_msg = None
+            self._is_private = False
         elif self._listener.userTransmission:
             self._sent_msg = await user.get_messages(
-                chat_id=self._listener.message.chat.id, message_ids=self._listener.mid
+                chat_id=self._listener.message.chat.id,
+                message_ids=self._listener.mid
             )
             if self._sent_msg is None:
                 self._sent_msg = await user.send_message(
                     chat_id=self._listener.message.chat.id,
                     text="Deleted Cmd Message! Don't delete the cmd message again!",
-                    disable_web_page_preview=True,
                     disable_notification=True,
                 )
         else:
@@ -170,6 +150,74 @@ class TgUploader:
                 new_path = ospath.join(dirpath, f"{name}{ext}")
                 await rename(self._up_path, new_path)
                 self._up_path = new_path
+        import os
+        import re
+
+        basename = os.path.basename(file_)
+        ext = os.path.splitext(basename)[1].lower()
+
+        is_pdf = ext == ".pdf"
+        is_video = ext in (".mp4", ".mkv", ".mov", ".webm", ".m4v", ".avi", ".ts")
+
+        counter = "_pdf_index" if is_pdf else "_video_index" if is_video else "_other_index"
+
+        shared = getattr(self._listener, "sameDir", None)
+        if not isinstance(shared, dict):
+            shared = {}
+            self._listener.sameDir = shared
+
+        index = int(shared.get(counter, 0)) + 1
+        shared[counter] = index
+
+        source_link = getattr(self._listener, "link", "")
+        if isinstance(source_link, dict):
+            source_link = str(source_link.get("link", ""))
+
+        source_link = str(source_link).split("?")[0].strip()
+        title = os.path.splitext(basename)[0]
+
+        for mapping_file in ("video_links.txt", "pdf_links.txt"):
+            mapping_path = os.path.join(os.getcwd(), mapping_file)
+            if not os.path.isfile(mapping_path):
+                continue
+
+            with open(mapping_path, encoding="utf-8") as mapping:
+                for line in mapping:
+                    parts = line.strip().rsplit(None, 1)
+                    if len(parts) != 2:
+                        continue
+                    mapped_title, mapped_url = parts
+                    if mapped_url.split("?")[0].strip() == source_link:
+                        title = mapped_title.strip()
+                        break
+            if title != os.path.splitext(basename)[0]:
+                break
+
+        title = re.sub(r'[\\/:*?"<>|]+', "_", title).strip(" ._")
+        if not title:
+            title = "Untitled"
+
+        new_name = f"{index:03d}_{title}{ext}"
+        new_name = new_name[:180 - len(ext)] + ext
+        new_path = ospath.join(ospath.dirname(self._up_path), new_name)
+
+        if self._up_path != new_path:
+            if await aiopath.exists(new_path):
+                new_name = f"{index:03d}_{title}_{self._listener.mid}{ext}"
+                new_path = ospath.join(ospath.dirname(self._up_path), new_name)
+            await rename(self._up_path, new_path)
+            self._up_path = new_path
+
+        topic = "SIMPLE INTEREST"
+        course = "Abhinay Toppers Batch 2026"
+
+        cap_mono = (
+            f"INDEX NO : {index:03d}\n"
+            f"TITLE : {title}\n"
+            f"TOPIC : {topic}\n"
+            f"COURSE : {course}\n"
+            f"EXTRACTED BY : @sscexamdecoder"
+        )
         return cap_mono
 
     def _get_input_media(self, subkey, key):
@@ -262,6 +310,26 @@ class TgUploader:
                                         await self._send_media_group(subkey, key, msgs)
                     self._last_msg_in_group = False
                     self._last_uploaded = 0
+                    if self._listener.upDest:
+                        client = user if self._listener.userTransmission else self._listener.client
+                        lower_name = file_.lower()
+
+                        if lower_name.endswith(".pdf"):
+                            label = "📄 PDF"
+                        elif lower_name.endswith((".mp4", ".mkv", ".mov", ".webm", ".m4v", ".avi", ".ts")):
+                            label = "🎬 Video"
+                        else:
+                            label = "📁 File"
+
+                        self._upload_status_msg = await client.send_message(
+                            chat_id=self._listener.upDest,
+                            text=f"{label} Uploading...\n{file_}",
+                            disable_web_page_preview=True,
+                            disable_notification=True,
+                        )
+                        self._sent_msg = self._upload_status_msg
+                        self._is_private = self._sent_msg.chat.type.name == "PRIVATE"
+
                     await self._upload_file(cap_mono, file_, f_path)
                     if self._listener.isCancelled:
                         return
@@ -284,6 +352,13 @@ class TgUploader:
                         return
                     continue
                 finally:
+                    if self._upload_status_msg is not None:
+                        try:
+                            await deleteMessage(self._upload_status_msg)
+                        except Exception as status_err:
+                            LOGGER.warning(f'Could not delete upload status: {status_err}')
+                        finally:
+                            self._upload_status_msg = None
                     if (
                         not self._listener.isCancelled
                         and await aiopath.exists(self._up_path)

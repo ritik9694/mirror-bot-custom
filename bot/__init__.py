@@ -15,6 +15,12 @@ from logging import (
 )
 from os import remove, path as ospath, environ
 from pymongo import MongoClient
+import asyncio
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 from pyrogram import Client as tgClient, enums
 from qbittorrentapi import Client as qbClient
 from socket import setdefaulttimeout
@@ -482,6 +488,10 @@ aria2c_global = [
 ]
 
 log_info("Creating client from BOT_TOKEN")
+import asyncio
+asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+asyncio.set_event_loop(asyncio.new_event_loop())
+
 bot = tgClient(
     "bot",
     TELEGRAM_API,
